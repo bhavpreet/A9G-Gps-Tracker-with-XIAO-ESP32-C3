@@ -13,6 +13,7 @@
 
 #define MENU_BASED_SYSTEM false
 #define LOCATION_INTERVAL 10000
+#define DEFAULT_TIMEOUT 5000
 
 // Notes:
 /*
@@ -39,8 +40,6 @@ char call;
 bool serialPassthrough = false;
 static unsigned long lastLocation = 0;
 
-void receive_message();
-void SendMessage();
 void MakeCall();
 void RedialCall();
 void HangupCall();
@@ -50,6 +49,7 @@ void MQTTPush();
 void resetA9G();
 void SerialPassthrough();
 String sendData(String command, const int timeout, boolean debug);
+String sendData(String command);
 void menu_loop();
 void gprsConnect();
 void setLowPowerMode();
@@ -77,9 +77,8 @@ void setup()
   String resp;
   Serial.begin(115200); // baudrate for serial monitor
 
-  Serial.println("Sleeping for 25 seconds");
-  sleep(25);
-  A9G.begin(115200); // baudrate for GSM shield
+  sleep(5);
+  A9G.begin(115201); // baudrate for GSM shield
 
   printUsage();
 
@@ -87,21 +86,20 @@ void setup()
   while (true)
   {
     Serial.println("Initializing A9G");
-    resp = sendData("AT", 2000, DEBUG);
+    resp = sendData("AT");
     if (resp.indexOf("OK") >= 0)
     {
       Serial.println("A9G is ready");
       break;
     }
-    Serial.println("A9G is not responding");
-    sleep(5);
+    Serial.println("A9G is not ready");
+    sleep(1);
   }
 
   // Connect
   gprsConnect();
   MQTTConnect();
   // Initialize GPS
-
   resp = sendData("AT+CREG?", 500, DEBUG);
   // Enable GPS; let it aquire the fix
   resp = sendData("AT+GPS=1", 500, DEBUG);
@@ -117,18 +115,6 @@ void setup()
   }
 
   setLowPowerMode();
-  /*SIM900.println("AT+GPS=1");
-  delay(100);
-  SIM900.println("AT+GPSRD=5");
-  delay(5000);*/
-
-  // // set SMS mode to text mode
-  // A9G.print("AT+CMGF=1\r");
-  // delay(100);
-
-  // // set gsm module to tp show the output on serial out
-  // A9G.print("AT+CNMI=2,2,0,0,0\r");
-  // delay(100);
 }
 
 void loop()
@@ -155,14 +141,9 @@ void menu_loop()
     return;
   }
 
-  receive_message();
-
   if (Serial.available() > 0)
     switch (Serial.read())
     {
-    case 's':
-      SendMessage();
-      break;
     case 'c':
       MakeCall();
       break;
@@ -191,43 +172,11 @@ void menu_loop()
       printUsage();
     }
 }
-void receive_message()
-{
-  if (A9G.available() > 0)
-  {
-    incomingData = A9G.readString(); // Get the data from the serial port.
-    Serial.print(incomingData);
-    delay(10);
-  }
-}
-
-void SendMessage()
-{
-  A9G.println("AT+CMGF=1");                  // Sets the GSM Module in Text Mode
-  delay(1000);                               // Delay of 1000 milli seconds or 1 second
-  A9G.println("AT+CMGS=\"919868128432\"\r"); // Replace x with mobile number
-  delay(1000);
-  A9G.println("sim900a sms"); // The SMS text you want to send
-  delay(100);
-  A9G.println((char)26); // ASCII code of CTRL+Z
-  delay(1000);
-}
-
-void ReceiveMessage()
-{
-  A9G.println("AT+CNMI=2,2,0,0,0"); // AT Command to recieve a live SMS
-  delay(1000);
-  if (A9G.available() > 0)
-  {
-    msg = A9G.read();
-    Serial.print(msg);
-  }
-}
 
 void MakeCall()
 {
-  A9G.println("ATD+919868128432;"); // ATDxxxxxxxxxx; -- watch out here for semicolon at the end, replace your number here!!
-  Serial.println("Calling  ");      // print response over serial port
+  A9G.println("ATD+91<your-number>;"); // ATDxxxxxxxxxx; -- watch out here for semicolon at the end, replace your number here!!
+  Serial.println("Calling  ");         // print response over serial port
   delay(1000);
 }
 
@@ -263,19 +212,39 @@ void ReadLocation()
   delay(1000);
 }
 
+String sendData(String command)
+{
+  return sendData(command, DEFAULT_TIMEOUT, DEBUG);
+}
+
+// Sends a command and waits for the response to complete.
+// The response either ends with OK or +CME ERROR: <err>
 String sendData(String command, const int timeout, boolean debug)
 {
   String response = "";
-  A9G.println(command);
+  A9G.println(command); // Send command
   long int time = millis();
-  while ((time + timeout) > millis())
+
+  // End of response checks for either OK or +CMS ERROR: <err>
+  bool endOfResponse = false;
+  while (!endOfResponse && (time + timeout) > millis())
   {
     while (A9G.available())
     {
       char c = A9G.read();
       response += c;
+      if (response.indexOf("OK") >= 0 || response.indexOf("ERROR") >= 0)
+      {
+        endOfResponse = true;
+      }
+    }
+    if ((time + timeout) < millis())
+    {
+      Serial.println("A9G could not get response");
+      return "";
     }
   }
+
   if (debug)
   {
     Serial.print(response);
@@ -286,7 +255,6 @@ String sendData(String command, const int timeout, boolean debug)
 void resetA9G()
 {
   sendData("AT+RST=1", 1000, DEBUG);
-  delay(1000);
 }
 
 String getBatteryPercentage(int delay, bool debug)
@@ -294,25 +262,16 @@ String getBatteryPercentage(int delay, bool debug)
   String msg = sendData("AT+CBC?", delay, debug);
   if (msg.indexOf("OK") >= 0)
   {
-    // Parse the message and return only the third line separated by CRLF
-    int startIndex = msg.indexOf("\r\n", msg.indexOf("\r\n") + 1) + 2;
-    int endIndex = msg.indexOf("\r\n", startIndex);
-    String ret = msg.substring(startIndex, endIndex);
-    // ret is of type +CBC: 0, 89, so we need to get the second value
-    int commaIndex = ret.indexOf(",");
-    if (commaIndex < 0)
-    {
-      Serial.println("A9G could not get battery percentage");
-      return "0";
-    }
-
-    String batteryPercentage = ret.substring(commaIndex + 1);
-    // trim white space
+    // Message looks like +CBC: 0, <pct>, extract <pct> part
+    String ret = msg.substring(msg.indexOf("+CBC:"));
+    // extract <pct> part, take till CRLF
+    String batteryPercentage = ret.substring(ret.indexOf(",") + 1, ret.indexOf("\r\n"));
     batteryPercentage.trim();
-    Serial.println("A9G battery percentage: " + batteryPercentage);
+    if (debug)
+      Serial.println("Precentage = '" + batteryPercentage + "'");
     return batteryPercentage;
   }
-  return "0";
+  return "1"; // who knows what!
 }
 
 String getLatLong(int delay, bool debug)
@@ -337,9 +296,23 @@ String getLatLong(int delay, bool debug)
 
 void gprsConnect()
 {
+  String resp;
+  // Disconnect first
+  sendData("AT+CGACT=0,1", 1000, DEBUG);
   sendData("AT+CGATT=1", 1000, DEBUG);
-  sendData("AT+CGDCONT=1,\"IP\",\"WWW\"", 1000, DEBUG);
-  sendData("AT+CGACT=1,1", 1000, DEBUG);
+  resp = sendData("AT+CGDCONT=1,\"IP\",\"WWW\"", 1000, DEBUG);
+  if (resp.indexOf("OK") >= 0)
+  {
+    Serial.println("A9G GPRS is enabled");
+  }
+  else
+  {
+    Serial.println("A9G GPRS is not enabled enabling GPRS");
+    // Call setup again??
+    resetA9G();
+    setup();
+  }
+  resp = sendData("AT+CGACT=1,1", 1000, DEBUG);
 }
 
 void gpsConnect()
@@ -377,14 +350,13 @@ void agpsConnect()
 
 void setLowPowerMode()
 {
-  sendData("AT+GPSLP=2", 1000, DEBUG);
-  sendData("AT+SLEEP=1", 1000, DEBUG);
+  sendData("AT+GPSLP=2");
+  sendData("AT+SLEEP=1");
 }
 
 void MQTTConnect()
 {
   sendData("AT+MQTTDISCONN", 1000, DEBUG);
-  delay(1000);
   // AT+MQTTCONN=<host>,<port>,<clientid>,<aliveSeconds>,<cleansession>,<username>,<password>
   char mqttReq[1024];
   if (sprintf(
@@ -427,8 +399,6 @@ void MQTTPush()
   {
     Serial.println("A9G SENT message to the arduino MQTT broker");
   }
-
-  delay(2000);
 }
 
 void SerialPassthrough()
