@@ -12,7 +12,7 @@
 #endif
 
 #define MENU_BASED_SYSTEM false
-#define LOCATION_INTERVAL 10000
+#define LOCATION_INTERVAL 15000
 #define DEFAULT_TIMEOUT 5000
 
 // Notes:
@@ -54,6 +54,8 @@ void menu_loop();
 void gprsConnect();
 void setLowPowerMode();
 void MQTTConnect();
+void diagnose();
+bool isError(String resp);
 
 void printUsage()
 {
@@ -135,6 +137,7 @@ void loop()
 
 void menu_loop()
 {
+  diagnose();
   if (serialPassthrough)
   {
     SerialPassthrough();
@@ -387,7 +390,28 @@ void MQTTPush()
   if (latLong == "")
   {
     Serial.println("A9G could not get location");
+    // diagnose();
     return;
+  }
+
+  // Validate if our data is valid
+  // Check if speed(battery) is a number
+  for (int i = 0; i < speed.length(); i++)
+  {
+    if (!isdigit(speed[i]))
+    {
+      Serial.println("Battery value is in invalid format");
+      return;
+    }
+  }
+  // Check if latLong is a GPS coordinate
+  for (int i = 0; i < latLong.length(); i++)
+  {
+    if (!isdigit(latLong[i]) && latLong[i] != '.' && latLong[i] != ',')
+    {
+      Serial.println("GPS value is in invalid format");
+      return;
+    }
   }
 
   char mqttPush[1024];
@@ -398,6 +422,12 @@ void MQTTPush()
   if (msg2.indexOf("OK") >= 0)
   {
     Serial.println("A9G SENT message to the arduino MQTT broker");
+  }
+  else
+  {
+    // we might need to reset?
+    resetA9G();
+    setup();
   }
 }
 
@@ -410,5 +440,30 @@ void SerialPassthrough()
   while (A9G.available() > 0)
   {
     Serial.write(A9G.read());
+  }
+}
+
+bool isError(String resp)
+{
+  Serial.println("isError: " + resp);
+  return resp.indexOf("ERROR") >= 0;
+}
+
+void diagnose()
+{
+  // Check if GPRS is connected
+  String resp = sendData("AT+CGACT?", 1000, DEBUG);
+  if (isError(resp))
+  {
+    Serial.println("GPRS is not connected");
+    setup();
+  }
+
+  // check if gps is connected
+  resp = sendData("AT+GPS?", 1000, DEBUG);
+  if (isError(resp))
+  {
+    Serial.println("GPS is not connected");
+    setup();
   }
 }
